@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuración de Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ARIA-SERVER")
 
@@ -23,6 +22,8 @@ MAX_HISTORY = 10
 
 SYSTEM_PROMPT = """Eres ARIA ULTIMATE, el asistente de voz definitivo.
 Responde SIEMPRE en JSON: {"accion":"ACCION","dato":"valor","respuesta":"lo que dirás"}
+
+Si el usuario solo te saluda o dice tu nombre, responde de forma breve y amable confirmando que estás lista para ayudar.
 
 ACCIONES:
 - ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, ABRIR_JUEGO
@@ -52,7 +53,7 @@ async def preguntar_ia(comando: str, client_id: str):
             json={
                 "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": mensajes,
-                "temperature": 0.5,
+                "temperature": 0.6, # Un poco más de creatividad para saludos
             },
             timeout=20
         )
@@ -69,22 +70,21 @@ async def preguntar_ia(comando: str, client_id: str):
             return res_json
     except Exception as e:
         logger.error(f"Error IA: {e}")
-    return {"accion": "RESPONDER", "dato": "", "respuesta": "Error en el cerebro cloud."}
+    return {"accion": "RESPONDER", "dato": "", "respuesta": "Dime, te escucho."}
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "2.0-ultimate"}
+    return {"status": "online", "version": "3.1-enhanced"}
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     if token != ARIA_AUTH_TOKEN:
-        logger.warning("Intento de conexión con token inválido")
         await websocket.close(code=1008)
         return
 
     await websocket.accept()
     client_id = f"{websocket.client.host}:{websocket.client.port}"
-    logger.info(f"Conexión establecida: {client_id}")
+    logger.info(f"Conexión: {client_id}")
 
     try:
         while True:
@@ -93,19 +93,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             
             if message.get("type") == "command":
                 comando = message.get("text")
-                logger.info(f"Comando de {client_id}: {comando}")
-                
+                logger.info(f"Comando: {comando}")
                 respuesta_ia = await preguntar_ia(comando, client_id)
-                
-                await websocket.send_text(json.dumps({
-                    "type": "execution",
-                    "payload": respuesta_ia
-                }))
+                await websocket.send_text(json.dumps({"type": "execution", "payload": respuesta_ia}))
                 
     except WebSocketDisconnect:
         logger.info(f"Desconectado: {client_id}")
     except Exception as e:
-        logger.error(f"Error en WS: {e}")
+        logger.error(f"Error WS: {e}")
 
 if __name__ == "__main__":
     import uvicorn
