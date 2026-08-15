@@ -8,7 +8,6 @@ from typing import List, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ARIA-SERVER")
 
@@ -23,14 +22,19 @@ MAX_HISTORY = 10
 SYSTEM_PROMPT = """Eres ARIA ULTIMATE, el asistente de voz definitivo.
 Responde SIEMPRE en JSON: {"accion":"ACCION","dato":"valor","respuesta":"lo que dirás"}
 
-Si el usuario solo te saluda o dice tu nombre, responde de forma breve y amable confirmando que estás lista para ayudar.
+GUÍA DE ACCIONES:
+- ABRIR_WEB: Si pide YouTube, Facebook, o una web (dato: url o nombre).
+- BUSCAR_WEB: Si pide buscar algo en internet (dato: términos de búsqueda).
+- ABRIR_APP: Si pide abrir Spotify, Discord, Calculadora, etc (dato: nombre app).
+- VOLUMEN_SUBIR / VOLUMEN_BAJAR / VOLUMEN_MUTE: Control de audio.
+- MEDIA_PLAY_PAUSE: Pausar/reproducir música.
+- CAPTURA_PANTALLA: Tomar foto de la pantalla.
+- SISTEMA_INFO: Estado de CPU/RAM.
+- SISTEMA: dato "bloquear" o "apagar".
+- RESPONDER: Para charla normal o si no hay acción física.
 
-ACCIONES:
-- ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, ABRIR_JUEGO
-- VOLUMEN_SUBIR, VOLUMEN_BAJAR, VOLUMEN_MUTE
-- MEDIA_PLAY_PAUSE, MEDIA_SIGUIENTE, MEDIA_ANTERIOR
-- VENTANA_MINIMIZAR, VENTANA_MAXIMIZAR, VENTANA_CERRAR, VENTANA_CAMBIAR
-- SISTEMA_INFO, CAPTURA_PANTALLA, SISTEMA (apagar, bloquear), RESPONDER
+IMPORTANTE: Si el usuario dice "abre youtube", usa ABRIR_WEB con dato "youtube.com".
+Si dice "busca fotos de perros", usa BUSCAR_WEB con dato "fotos de perros".
 """
 
 async def preguntar_ia(comando: str, client_id: str):
@@ -53,28 +57,34 @@ async def preguntar_ia(comando: str, client_id: str):
             json={
                 "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": mensajes,
-                "temperature": 0.6, # Un poco más de creatividad para saludos
+                "temperature": 0.4,
             },
             timeout=20
         )
         if r.status_code == 200:
             res_raw = r.json()["choices"][0]["message"]["content"]
+            # Limpiar posibles bloques de código
             res_raw = re.sub(r"```json|```", "", res_raw).strip()
-            res_json = json.loads(res_raw)
-            
-            memory.append({"role": "user", "content": comando})
-            memory.append({"role": "assistant", "content": res_raw})
-            if len(memory) > MAX_HISTORY * 2:
-                clients_memory[client_id] = memory[-MAX_HISTORY*2:]
-            
-            return res_json
+            # Intentar extraer JSON si hay texto extra
+            match = re.search(r'\{.*\}', res_raw, re.DOTALL)
+            if match:
+                res_json = json.loads(match.group())
+                
+                memory.append({"role": "user", "content": comando})
+                memory.append({"role": assistant_role, "content": match.group()})
+                if len(memory) > MAX_HISTORY * 2: clients_memory[client_id] = memory[-MAX_HISTORY*2:]
+                
+                return res_json
     except Exception as e:
         logger.error(f"Error IA: {e}")
-    return {"accion": "RESPONDER", "dato": "", "respuesta": "Dime, te escucho."}
+    
+    return {"accion": "RESPONDER", "dato": "", "respuesta": "Lo siento, tuve un problema al procesar eso."}
+
+assistant_role = "assistant"
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "3.1-enhanced"}
+    return {"status": "online", "version": "3.2-total-control"}
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
