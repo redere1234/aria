@@ -4,7 +4,7 @@ import requests
 import re
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from typing import List, Dict, Optional
+from typing import List, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,38 +17,34 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ARIA_AUTH_TOKEN = os.getenv("ARIA_AUTH_TOKEN", "aria-secret-token")
 
 clients_memory: Dict[str, List[Dict]] = {}
-MAX_HISTORY = 15
+MAX_HISTORY = 10
 
-# SYSTEM PROMPT AVANZADO PARA DETECCIÓN DE INTENCIÓN
-SYSTEM_PROMPT_OMNI = """Eres ARIA ULTIMATE OMNI, una IA integrada en el PC del usuario.
-Tu objetivo es detectar si el usuario te está hablando a ti o si está haciendo un comentario general.
+SYSTEM_PROMPT_OMNI = """Eres ARIA ULTIMATE OMNI.
+Tu misión es controlar el PC del usuario y responder dudas.
 
 REGLAS DE OMNIPRESENCIA:
-1. Analiza el texto recibido. Si el usuario da una orden clara (ej. "abre...", "busca...", "pon...", "dime...") o hace una pregunta, ACTÚA.
-2. Si el texto parece ruido de fondo o una conversación con otra persona que no requiere tu intervención, responde con la acción "IGNORAR".
-3. Responde SIEMPRE en JSON: {"accion":"ACCION","dato":"valor","respuesta":"lo que dirás","confianza":0.0-1.0}
+1. Si el usuario dice tu nombre (Aria, Haria, Area, etc.) o da una orden directa (abre, busca, pon, dime), DEBES ACTUAR.
+2. Si el usuario está hablando de cosas generales que no requieren acción, responde con "IGNORAR".
+3. Si tienes dudas de si es para ti, responde amablemente preguntando si necesitas algo.
 
-ACCIONES DISPONIBLES:
-- ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, ABRIR_JUEGO
-- VOLUMEN_SUBIR, VOLUMEN_BAJAR, VOLUMEN_MUTE
-- MEDIA_PLAY_PAUSE, MEDIA_SIGUIENTE, MEDIA_ANTERIOR
-- VENTANA_MINIMIZAR, VENTANA_MAXIMIZAR, VENTANA_CERRAR, VENTANA_CAMBIAR
-- SISTEMA_INFO, CAPTURA_PANTALLA, SISTEMA (bloquear, apagar)
-- RESPONDER (para charla o dudas)
-- IGNORAR (si no es para ti)
-- CONFIRMAR (para acciones críticas como apagar)
+FORMATO JSON OBLIGATORIO:
+{"accion":"ACCION","dato":"valor","respuesta":"lo que dirás","es_para_mi": true/false}
 
-Si detectas una orden pero no estás 100% seguro, usa la acción "RESPONDER" preguntando si quieres que ejecutes dicha acción.
+ACCIONES: ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, VOLUMEN_SUBIR, VOLUMEN_BAJAR, MEDIA_PLAY_PAUSE, CAPTURA_PANTALLA, SISTEMA_INFO, RESPONDER, IGNORAR.
 """
 
-async def clasificar_intencion(texto: str, client_id: str):
+async def preguntar_ia(texto: str, client_id: str):
     if client_id not in clients_memory:
         clients_memory[client_id] = []
     
     memory = clients_memory[client_id]
+    
+    # Detección rápida de Wake Word antes de llamar a la IA para ahorrar tiempo
+    wake_words = ["aria", "area", "arya", "haria", "haría", "adia"]
+    fuerza_respuesta = any(word in texto.lower() for word in wake_words)
+
     mensajes = [{"role": "system", "content": SYSTEM_PROMPT_OMNI}]
-    # Añadimos contexto reciente para entender si la conversación sigue
-    mensajes.extend(memory[-6:]) 
+    mensajes.extend(memory[-4:]) # Contexto corto para velocidad
     mensajes.append({"role": "user", "content": texto})
 
     try:
@@ -62,7 +58,7 @@ async def clasificar_intencion(texto: str, client_id: str):
             json={
                 "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": mensajes,
-                "temperature": 0.3, # Baja temperatura para mayor precisión en comandos
+                "temperature": 0.5,
             },
             timeout=15
         )
@@ -73,21 +69,24 @@ async def clasificar_intencion(texto: str, client_id: str):
             if match:
                 res_json = json.loads(match.group())
                 
-                # Solo guardamos en memoria si no fue ignorado
+                # Si detectamos wake word pero la IA quería ignorar, forzamos respuesta
+                if fuerza_respuesta and res_json.get("accion") == "IGNORAR":
+                    res_json["accion"] = "RESPONDER"
+                    res_json["respuesta"] = "¿Sí? Dime qué necesitas."
+                
                 if res_json.get("accion") != "IGNORAR":
                     memory.append({"role": "user", "content": texto})
-                    memory.append({"role": "assistant", "content": match.group()})
-                    if len(memory) > MAX_HISTORY * 2: clients_memory[client_id] = memory[-MAX_HISTORY*2:]
+                    memory.append({"role": "assistant", "content": json.dumps(res_json)})
                 
                 return res_json
     except Exception as e:
-        logger.error(f"Error OMNI Engine: {e}")
+        logger.error(f"Error IA: {e}")
     
     return {"accion": "IGNORAR", "dato": "", "respuesta": ""}
 
 @app.get("/")
 async def root():
-    return {"status": "online", "mode": "OMNI-INTENT", "version": "4.0"}
+    return {"status": "online", "mode": "OMNI-V4.1"}
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
@@ -97,7 +96,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
     await websocket.accept()
     client_id = f"{websocket.client.host}:{websocket.client.port}"
-    logger.info(f"Sesión OMNI Iniciada: {client_id}")
 
     try:
         while True:
@@ -106,21 +104,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             
             if message.get("type") == "audio_text":
                 texto = message.get("text")
-                logger.info(f"Analizando: {texto}")
+                decision = await preguntar_ia(texto, client_id)
                 
-                # El motor decide si actuar o ignorar
-                decision = await clasificar_intencion(texto, client_id)
-                
-                if decision.get("accion") != "IGNORAR":
-                    await websocket.send_text(json.dumps({
-                        "type": "execution",
-                        "payload": decision
-                    }))
+                # Siempre enviamos la decisión al cliente, incluso si es IGNORAR, 
+                # para que el cliente pueda mostrar feedback visual de lo que pasó.
+                await websocket.send_text(json.dumps({
+                    "type": "decision",
+                    "payload": decision,
+                    "original_text": texto
+                }))
                 
     except WebSocketDisconnect:
-        logger.info(f"Sesión Finalizada: {client_id}")
+        pass
     except Exception as e:
-        logger.error(f"Error OMNI WS: {e}")
+        logger.error(f"Error WS: {e}")
 
 if __name__ == "__main__":
     import uvicorn
