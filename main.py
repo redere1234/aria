@@ -10,9 +10,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ARIA-OMNI-SERVER")
+logger = logging.getLogger("ARIA-OMNI-X-SERVER")
 
-app = FastAPI(title="ARIA OMNI Cloud Server")
+app = FastAPI(title="ARIA OMNI X Server")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ARIA_AUTH_TOKEN = os.getenv("ARIA_AUTH_TOKEN", "aria-secret-token")
@@ -21,28 +21,32 @@ clients_memory: Dict[str, List[Dict]] = {}
 MAX_HISTORY = 10
 
 def normalizar(texto):
-    """ Elimina acentos y convierte a minúsculas """
     s = ''.join(c for c in unicodedata.normalize('NFD', texto.lower())
                 if unicodedata.category(c) != 'Mn')
-    # Limpieza de ruidos comunes del mic
-    s = s.replace("habra", "abre").replace("ahora", "abre").replace("abra", "abre").replace("habria", "abre")
+    # Mapeo fonético agresivo
+    replacements = {
+        "habra": "abre", "ahora": "abre", "abra": "abre", "habria": "abre",
+        "ponme": "pon", "reproduce": "pon", "escuchar": "pon", "busca": "buscar"
+    }
+    for k, v in replacements.items():
+        s = s.replace(k, v)
     return s
 
-SYSTEM_PROMPT_OMNI = """Eres ARIA ULTIMATE OMNI.
-TU ÚNICA MISIÓN ES EJECUTAR COMANDOS.
+SYSTEM_PROMPT_OMNI_X = """Eres ARIA OMNI X, el asistente de control total definitivo.
+TU PRIORIDAD ES LA ACCIÓN FÍSICA EN EL PC.
 
-Si el usuario dice "abre [sitio]", DEBES responder con ACCION: ABRIR_WEB.
-Ejemplo: "abre youtube" -> {"accion":"ABRIR_WEB", "dato":"youtube.com", "respuesta":"Abriendo YouTube"}
+REGLAS DE ORO:
+1. NUNCA IGNORES. Si el usuario habla, responde o actúa.
+2. Si pide "pon [canción/artista]", usa ACCION: REPRODUCIR_MUSICA.
+3. Si pide "abre [app]", usa ACCION: ABRIR_APP.
+4. Si pide "abre [web/youtube]", usa ACCION: ABRIR_WEB.
+5. Si pide "busca [término]", usa ACCION: BUSCAR_WEB.
+6. Si pide "captura" o "pantallazo", usa ACCION: CAPTURA_PANTALLA.
 
-ACCIONES DISPONIBLES:
-- ABRIR_WEB (dato: url)
-- BUSCAR_WEB (dato: busqueda)
-- ABRIR_APP (dato: nombre)
-- VOLUMEN_SUBIR, VOLUMEN_BAJAR, CAPTURA_PANTALLA
-- RESPONDER (solo si es charla)
-- IGNORAR (solo si es ruido)
+FORMATO JSON OBLIGATORIO:
+{"accion":"ACCION", "dato":"valor", "respuesta":"mensaje"}
 
-Responde SIEMPRE en JSON puro.
+ACCIONES: ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, REPRODUCIR_MUSICA, VOLUMEN_SUBIR, VOLUMEN_BAJAR, MEDIA_PLAY_PAUSE, CAPTURA_PANTALLA, SISTEMA_INFO, RESPONDER.
 """
 
 async def preguntar_ia(texto: str, client_id: str):
@@ -52,19 +56,28 @@ async def preguntar_ia(texto: str, client_id: str):
     memory = clients_memory[client_id]
     texto_norm = normalizar(texto)
     
-    # --- DETECCIÓN DE EMERGENCIA (HARD-CODED) ---
-    # Si detectamos palabras clave de ejecución, forzamos la acción antes de la IA
-    if "youtube" in texto_norm and ("abre" in texto_norm or "ver" in texto_norm):
-        return {"accion": "ABRIR_WEB", "dato": "youtube.com", "respuesta": "Entendido, abriendo YouTube ahora mismo."}
+    # --- LÓGICA DE ACCIÓN DIRECTA (ULTRA-SENSIBLE) ---
+    if "youtube" in texto_norm or "musica" in texto_norm or "pon" in texto_norm or "reproduce" in texto_norm:
+        termino = ""
+        for trigger in ["pon", "reproduce", "busca"]:
+            if trigger in texto_norm:
+                termino = texto_norm.split(trigger)[-1].strip()
+                break
+        if not termino: termino = texto_norm
+        return {"accion": "REPRODUCIR_MUSICA", "dato": termino, "respuesta": f"Entendido, reproduciendo {termino}."}
     
-    if "google" in texto_norm and ("abre" in texto_norm or "busca" in texto_norm):
-        return {"accion": "ABRIR_WEB", "dato": "google.com", "respuesta": "Abriendo Google."}
+    if "abre" in texto_norm:
+        target = texto_norm.split("abre")[-1].strip()
+        if target:
+            if target in ["google", "navegador", "internet"]:
+                return {"accion": "ABRIR_WEB", "dato": "google.com", "respuesta": "Abriendo el navegador."}
+            return {"accion": "ABRIR_APP", "dato": target, "respuesta": f"Intentando abrir {target}."}
 
-    if "captura" in texto_norm and ("toma" in texto_norm or "haz" in texto_norm):
+    if "captura" in texto_norm or "pantallazo" in texto_norm:
         return {"accion": "CAPTURA_PANTALLA", "dato": "", "respuesta": "Capturando pantalla."}
 
-    # Si no es un comando crítico, consultamos a la IA
-    mensajes = [{"role": "system", "content": SYSTEM_PROMPT_OMNI}]
+    # Si no es un comando de acción directa, usamos la IA
+    mensajes = [{"role": "system", "content": SYSTEM_PROMPT_OMNI_X}]
     mensajes.extend(memory[-4:])
     mensajes.append({"role": "user", "content": texto})
 
@@ -73,13 +86,13 @@ async def preguntar_ia(texto: str, client_id: str):
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "HTTP-Referer": "https://aria-omni.local",
-                "X-Title": "ARIA OMNI"
+                "HTTP-Referer": "https://aria-omni-x.local",
+                "X-Title": "ARIA OMNI X"
             },
             json={
                 "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": mensajes,
-                "temperature": 0.1, # Mínima temperatura para máxima precisión
+                "temperature": 0.2,
             },
             timeout=15
         )
@@ -89,34 +102,20 @@ async def preguntar_ia(texto: str, client_id: str):
             match = re.search(r'\{.*\}', res_raw, re.DOTALL)
             if match:
                 res_json = json.loads(match.group())
+                if res_json.get("accion") == "IGNORAR":
+                    res_json = {"accion": "RESPONDER", "dato": "", "respuesta": "Te escucho, ¿qué necesitas?"}
                 
-                # Refuerzo: Si la IA dice RESPONDER pero el texto original tiene "abre", forzamos
-                if res_json.get("accion") == "RESPONDER" and "abre" in texto_norm:
-                    palabras = texto_norm.split()
-                    try:
-                        idx = palabras.index("abre")
-                        if idx + 1 < len(palabras):
-                            target = palabras[idx+1]
-                            res_json = {"accion": "ABRIR_WEB", "dato": f"{target}.com", "respuesta": f"Intentando abrir {target}"}
-                    except: pass
-
-                if res_json.get("accion") != "IGNORAR":
-                    memory.append({"role": "user", "content": texto})
-                    memory.append({"role": "assistant", "content": json.dumps(res_json)})
-                
+                memory.append({"role": "user", "content": texto})
+                memory.append({"role": "assistant", "content": json.dumps(res_json)})
                 return res_json
     except Exception as e:
         logger.error(f"Error IA: {e}")
     
-    # Fallback si parece una orden pero la IA falló
-    if "abre" in texto_norm or "busca" in texto_norm:
-        return {"accion": "RESPONDER", "dato": "", "respuesta": "Te he escuchado, pero no estoy segura de qué abrir. ¿Puedes repetirlo?"}
-        
-    return {"accion": "IGNORAR", "dato": "", "respuesta": ""}
+    return {"accion": "RESPONDER", "dato": "", "respuesta": "Dime qué necesitas y lo haré."}
 
 @app.get("/")
 async def root():
-    return {"status": "online", "mode": "OMNI-V4.3-DIRECT"}
+    return {"status": "online", "mode": "OMNI-X-ULTIMATE"}
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
