@@ -22,22 +22,27 @@ MAX_HISTORY = 10
 
 def normalizar(texto):
     """ Elimina acentos y convierte a minúsculas """
-    return ''.join(c for c in unicodedata.normalize('NFD', texto.lower())
-                  if unicodedata.category(c) != 'Mn')
+    s = ''.join(c for c in unicodedata.normalize('NFD', texto.lower())
+                if unicodedata.category(c) != 'Mn')
+    # Limpieza de ruidos comunes del mic
+    s = s.replace("habra", "abre").replace("ahora", "abre").replace("abra", "abre").replace("habria", "abre")
+    return s
 
-SYSTEM_PROMPT_OMNI = """Eres ARIA ULTIMATE OMNI. Eres un asistente de control total.
-TU PRIORIDAD ES ACTUAR. No seas tímida.
+SYSTEM_PROMPT_OMNI = """Eres ARIA ULTIMATE OMNI.
+TU ÚNICA MISIÓN ES EJECUTAR COMANDOS.
 
-REGLAS CRÍTICAS:
-1. Si el usuario menciona "Aria" o variaciones (area, haria, adia, etc.), responde SIEMPRE.
-2. Si el usuario usa verbos de acción: "abre", "busca", "pon", "sube", "baja", "toma", "dime", ACTÚA de inmediato.
-3. SOLO usa "IGNORAR" si el texto es ruido absoluto o palabras sueltas sin sentido.
-4. Si el usuario dice "abre youtube", la acción es ABRIR_WEB y el dato es "youtube.com".
+Si el usuario dice "abre [sitio]", DEBES responder con ACCION: ABRIR_WEB.
+Ejemplo: "abre youtube" -> {"accion":"ABRIR_WEB", "dato":"youtube.com", "respuesta":"Abriendo YouTube"}
 
-RESPONDE SIEMPRE EN ESTE FORMATO JSON:
-{"accion":"ACCION","dato":"valor","respuesta":"mensaje para el usuario"}
+ACCIONES DISPONIBLES:
+- ABRIR_WEB (dato: url)
+- BUSCAR_WEB (dato: busqueda)
+- ABRIR_APP (dato: nombre)
+- VOLUMEN_SUBIR, VOLUMEN_BAJAR, CAPTURA_PANTALLA
+- RESPONDER (solo si es charla)
+- IGNORAR (solo si es ruido)
 
-ACCIONES: ABRIR_WEB, BUSCAR_WEB, ABRIR_APP, VOLUMEN_SUBIR, VOLUMEN_BAJAR, MEDIA_PLAY_PAUSE, CAPTURA_PANTALLA, SISTEMA_INFO, RESPONDER, IGNORAR.
+Responde SIEMPRE en JSON puro.
 """
 
 async def preguntar_ia(texto: str, client_id: str):
@@ -47,14 +52,18 @@ async def preguntar_ia(texto: str, client_id: str):
     memory = clients_memory[client_id]
     texto_norm = normalizar(texto)
     
-    # Detección de Wake Words (Normalizada)
-    wake_words = ["aria", "area", "arya", "haria", "adia", "oiga", "oye"]
-    fuerza_respuesta = any(word in texto_norm for word in wake_words)
+    # --- DETECCIÓN DE EMERGENCIA (HARD-CODED) ---
+    # Si detectamos palabras clave de ejecución, forzamos la acción antes de la IA
+    if "youtube" in texto_norm and ("abre" in texto_norm or "ver" in texto_norm):
+        return {"accion": "ABRIR_WEB", "dato": "youtube.com", "respuesta": "Entendido, abriendo YouTube ahora mismo."}
     
-    # Detección de Comandos Directos (Normalizada)
-    comandos_directos = ["abre", "busca", "pon", "sube", "baja", "toma", "dime", "como esta"]
-    es_comando = any(cmd in texto_norm for cmd in comandos_directos)
+    if "google" in texto_norm and ("abre" in texto_norm or "busca" in texto_norm):
+        return {"accion": "ABRIR_WEB", "dato": "google.com", "respuesta": "Abriendo Google."}
 
+    if "captura" in texto_norm and ("toma" in texto_norm or "haz" in texto_norm):
+        return {"accion": "CAPTURA_PANTALLA", "dato": "", "respuesta": "Capturando pantalla."}
+
+    # Si no es un comando crítico, consultamos a la IA
     mensajes = [{"role": "system", "content": SYSTEM_PROMPT_OMNI}]
     mensajes.extend(memory[-4:])
     mensajes.append({"role": "user", "content": texto})
@@ -70,7 +79,7 @@ async def preguntar_ia(texto: str, client_id: str):
             json={
                 "model": "meta-llama/llama-3.1-8b-instruct:free",
                 "messages": mensajes,
-                "temperature": 0.4,
+                "temperature": 0.1, # Mínima temperatura para máxima precisión
             },
             timeout=15
         )
@@ -81,19 +90,16 @@ async def preguntar_ia(texto: str, client_id: str):
             if match:
                 res_json = json.loads(match.group())
                 
-                # REGLA DE ORO: Si es comando o wake word, prohibido IGNORAR
-                if (fuerza_respuesta or es_comando) and res_json.get("accion") == "IGNORAR":
-                    if es_comando:
-                        # Intentamos una reparación rápida si la IA falló
-                        if "youtube" in texto_norm: 
-                            res_json = {"accion": "ABRIR_WEB", "dato": "youtube.com", "respuesta": "Abriendo YouTube."}
-                        elif "google" in texto_norm:
-                            res_json = {"accion": "ABRIR_WEB", "dato": "google.com", "respuesta": "Abriendo Google."}
-                        else:
-                            res_json = {"accion": "RESPONDER", "dato": "", "respuesta": "¿Qué quieres que haga exactamente?"}
-                    else:
-                        res_json = {"accion": "RESPONDER", "dato": "", "respuesta": "Dime, te escucho."}
-                
+                # Refuerzo: Si la IA dice RESPONDER pero el texto original tiene "abre", forzamos
+                if res_json.get("accion") == "RESPONDER" and "abre" in texto_norm:
+                    palabras = texto_norm.split()
+                    try:
+                        idx = palabras.index("abre")
+                        if idx + 1 < len(palabras):
+                            target = palabras[idx+1]
+                            res_json = {"accion": "ABRIR_WEB", "dato": f"{target}.com", "respuesta": f"Intentando abrir {target}"}
+                    except: pass
+
                 if res_json.get("accion") != "IGNORAR":
                     memory.append({"role": "user", "content": texto})
                     memory.append({"role": "assistant", "content": json.dumps(res_json)})
@@ -102,30 +108,27 @@ async def preguntar_ia(texto: str, client_id: str):
     except Exception as e:
         logger.error(f"Error IA: {e}")
     
-    # Fallback si todo falla pero parece importante
-    if es_comando or fuerza_respuesta:
-        return {"accion": "RESPONDER", "dato": "", "respuesta": "Te escucho, ¿qué necesitas?"}
+    # Fallback si parece una orden pero la IA falló
+    if "abre" in texto_norm or "busca" in texto_norm:
+        return {"accion": "RESPONDER", "dato": "", "respuesta": "Te he escuchado, pero no estoy segura de qué abrir. ¿Puedes repetirlo?"}
         
     return {"accion": "IGNORAR", "dato": "", "respuesta": ""}
 
 @app.get("/")
 async def root():
-    return {"status": "online", "mode": "OMNI-V4.2-ULTRA"}
+    return {"status": "online", "mode": "OMNI-V4.3-DIRECT"}
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     if token != ARIA_AUTH_TOKEN:
         await websocket.close(code=1008)
         return
-
     await websocket.accept()
     client_id = f"{websocket.client.host}:{websocket.client.port}"
-
     try:
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
-            
             if message.get("type") == "audio_text":
                 texto = message.get("text")
                 decision = await preguntar_ia(texto, client_id)
@@ -134,11 +137,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "payload": decision,
                     "original_text": texto
                 }))
-                
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.error(f"Error WS: {e}")
+    except WebSocketDisconnect: pass
+    except Exception as e: logger.error(f"Error WS: {e}")
 
 if __name__ == "__main__":
     import uvicorn
